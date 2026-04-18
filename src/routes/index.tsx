@@ -1,18 +1,12 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react"
+import { indentWithTab } from "@codemirror/commands"
+import { HighlightStyle, syntaxHighlighting } from "@codemirror/language"
+import { EditorState } from "@codemirror/state"
+import { keymap, placeholder } from "@codemirror/view"
+import { tags as t } from "@lezer/highlight"
 import { createFileRoute } from "@tanstack/react-router"
 import { createServerFn } from "@tanstack/react-start"
-import {
-  ChevronDownIcon,
-  Download,
-  FileImageIcon,
-  FileType2Icon,
-  ImageIcon,
-} from "lucide-react"
+import { renderMermaidSVG, THEMES, type DiagramColors } from "beautiful-mermaid"
 import { basicSetup, EditorView } from "codemirror"
-import { indentWithTab } from "@codemirror/commands"
-import { EditorState } from "@codemirror/state"
-import { HighlightStyle, syntaxHighlighting } from "@codemirror/language"
-import { keymap, placeholder } from "@codemirror/view"
 import {
   flowchartTags,
   ganttTags,
@@ -23,8 +17,14 @@ import {
   requirementTags,
   sequenceTags,
 } from "codemirror-lang-mermaid"
-import { tags as t } from "@lezer/highlight"
-import { THEMES, renderMermaidSVG, type DiagramColors } from "beautiful-mermaid"
+import {
+  ChevronDownIcon,
+  Download,
+  FileImageIcon,
+  FileType2Icon,
+  ImageIcon,
+} from "lucide-react"
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react"
 import { TransformComponent, TransformWrapper } from "react-zoom-pan-pinch"
 
 import { Button } from "@/components/ui/button"
@@ -288,7 +288,7 @@ function flattenSvgForRaster(svg: string, colors: DiagramColors) {
     .replace(/background:var\(--bg\)/g, `background:${resolved.bg}`)
     .replace(
       /<style>[\s\S]*?<\/style>/,
-      `<style>text { font-family: Inter, system-ui, sans-serif; } .mono { font-family: "SF Mono", ui-monospace, monospace; }</style>`
+      `<style>text { font-family: Arial, Helvetica, "Liberation Sans", "DejaVu Sans", sans-serif; } .mono { font-family: "Courier New", "Liberation Mono", "DejaVu Sans Mono", monospace; }</style>`
     )
 
   for (const [token, value] of replacements) {
@@ -327,7 +327,13 @@ const exportRasterDiagram = createServerFn({ method: "POST" })
         ? await image.png().toBuffer()
         : await image.jpeg({ quality: 92 }).toBuffer()
 
-    return new Response(buffer, {
+    const body = new Uint8Array(
+      buffer.buffer,
+      buffer.byteOffset,
+      buffer.byteLength
+    )
+
+    return new Response(body, {
       headers: {
         "Content-Type": data.format === "png" ? "image/png" : "image/jpeg",
         "Content-Disposition": `attachment; filename="${data.fileName}.${data.format}"`,
