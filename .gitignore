@@ -12,3 +12,6 @@ count.txt
 .vinxi
 __unconfig*
 todos.json
+
+# opensrc - source code for packages
+opensrc/
