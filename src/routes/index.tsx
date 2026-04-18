@@ -1,6 +1,13 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react"
 import { createFileRoute } from "@tanstack/react-router"
-import { Download } from "lucide-react"
+import { createServerFn } from "@tanstack/react-start"
+import {
+  ChevronDownIcon,
+  Download,
+  FileImageIcon,
+  FileType2Icon,
+  ImageIcon,
+} from "lucide-react"
 import { basicSetup, EditorView } from "codemirror"
 import { indentWithTab } from "@codemirror/commands"
 import { EditorState } from "@codemirror/state"
@@ -17,10 +24,18 @@ import {
   sequenceTags,
 } from "codemirror-lang-mermaid"
 import { tags as t } from "@lezer/highlight"
-import { THEMES, renderMermaidSVG } from "beautiful-mermaid"
+import { THEMES, renderMermaidSVG, type DiagramColors } from "beautiful-mermaid"
 import { TransformComponent, TransformWrapper } from "react-zoom-pan-pinch"
 
 import { Button } from "@/components/ui/button"
+import { ButtonGroup } from "@/components/ui/button-group"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import {
   Select,
   SelectContent,
@@ -39,7 +54,9 @@ const THEME_NAMES = [
 ]
 const CANVAS_PADDING = 10
 const CANVAS_FIT_RATIO = 0.995
-const CANVAS_TOP_BIAS = 56
+const CANVAS_TOP_BIAS = 36
+const EXPORT_WIDTH = 2560
+const EXPORT_HEIGHT = 1440
 const EDITOR_PLACEHOLDER = `Paste Mermaid here...
 
 flowchart LR
@@ -179,6 +196,145 @@ const mermaidEditorTheme = EditorView.theme({
   },
 })
 
+type ExportFormat = "png" | "svg" | "jpeg"
+type RasterExportFormat = Exclude<ExportFormat, "svg">
+
+function normalizeHexColor(value: string) {
+  const normalized = value.trim()
+
+  if (/^#[\da-f]{3}$/i.test(normalized)) {
+    const [, r, g, b] = normalized
+    return `#${r}${r}${g}${g}${b}${b}`.toLowerCase()
+  }
+
+  return normalized.toLowerCase()
+}
+
+function mixHexColors(fg: string, bg: string, percentage: number) {
+  const foreground = normalizeHexColor(fg)
+  const background = normalizeHexColor(bg)
+
+  if (
+    !/^#[\da-f]{6}$/i.test(foreground) ||
+    !/^#[\da-f]{6}$/i.test(background)
+  ) {
+    return percentage >= 50 ? foreground : background
+  }
+
+  const blend = (from: number, to: number) =>
+    Math.round((from * percentage) / 100 + (to * (100 - percentage)) / 100)
+
+  const [fr, fgValue, fb] = [1, 3, 5].map((index) =>
+    Number.parseInt(foreground.slice(index, index + 2), 16)
+  )
+  const [br, bgValue, bb] = [1, 3, 5].map((index) =>
+    Number.parseInt(background.slice(index, index + 2), 16)
+  )
+
+  return `#${[blend(fr, br), blend(fgValue, bgValue), blend(fb, bb)]
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("")}`
+}
+
+function resolveDiagramColors(colors: DiagramColors) {
+  return {
+    bg: colors.bg,
+    fg: colors.fg,
+    line: colors.line ?? mixHexColors(colors.fg, colors.bg, 50),
+    accent: colors.accent ?? mixHexColors(colors.fg, colors.bg, 85),
+    muted: colors.muted ?? mixHexColors(colors.fg, colors.bg, 40),
+    surface: colors.surface ?? mixHexColors(colors.fg, colors.bg, 3),
+    border: colors.border ?? mixHexColors(colors.fg, colors.bg, 20),
+    text: colors.fg,
+    textSec: colors.muted ?? mixHexColors(colors.fg, colors.bg, 60),
+    textMuted: colors.muted ?? mixHexColors(colors.fg, colors.bg, 40),
+    textFaint: mixHexColors(colors.fg, colors.bg, 25),
+    arrow: colors.accent ?? mixHexColors(colors.fg, colors.bg, 85),
+    nodeFill: colors.surface ?? mixHexColors(colors.fg, colors.bg, 3),
+    nodeStroke: colors.border ?? mixHexColors(colors.fg, colors.bg, 20),
+    groupFill: colors.bg,
+    groupHeader: mixHexColors(colors.fg, colors.bg, 5),
+    innerStroke: mixHexColors(colors.fg, colors.bg, 12),
+    keyBadge: mixHexColors(colors.fg, colors.bg, 10),
+  }
+}
+
+function flattenSvgForRaster(svg: string, colors: DiagramColors) {
+  const resolved = resolveDiagramColors(colors)
+  const replacements = new Map<string, string>([
+    ["var(--bg)", resolved.bg],
+    ["var(--fg)", resolved.fg],
+    ["var(--line)", resolved.line],
+    ["var(--accent)", resolved.accent],
+    ["var(--muted)", resolved.muted],
+    ["var(--surface)", resolved.surface],
+    ["var(--border)", resolved.border],
+    ["var(--_text)", resolved.text],
+    ["var(--_text-sec)", resolved.textSec],
+    ["var(--_text-muted)", resolved.textMuted],
+    ["var(--_text-faint)", resolved.textFaint],
+    ["var(--_line)", resolved.line],
+    ["var(--_arrow)", resolved.arrow],
+    ["var(--_node-fill)", resolved.nodeFill],
+    ["var(--_node-stroke)", resolved.nodeStroke],
+    ["var(--_group-fill)", resolved.groupFill],
+    ["var(--_group-hdr)", resolved.groupHeader],
+    ["var(--_inner-stroke)", resolved.innerStroke],
+    ["var(--_key-badge)", resolved.keyBadge],
+  ])
+
+  let flattened = svg
+    .replace(/@import url\([^)]*\);\s*/g, "")
+    .replace(/background:var\(--bg\)/g, `background:${resolved.bg}`)
+    .replace(
+      /<style>[\s\S]*?<\/style>/,
+      `<style>text { font-family: Inter, system-ui, sans-serif; } .mono { font-family: "SF Mono", ui-monospace, monospace; }</style>`
+    )
+
+  for (const [token, value] of replacements) {
+    flattened = flattened.split(token).join(value)
+  }
+
+  flattened = flattened.replace(
+    /<svg([^>]*)>/,
+    `<svg$1><rect width="100%" height="100%" fill="${resolved.bg}" />`
+  )
+
+  return { svg: flattened, background: resolved.bg }
+}
+
+const exportRasterDiagram = createServerFn({ method: "POST" })
+  .inputValidator(
+    (data: {
+      svg: string
+      fileName: string
+      format: RasterExportFormat
+      colors: DiagramColors
+    }) => data
+  )
+  .handler(async ({ data }) => {
+    const sharp = (await import("sharp")).default
+    const rasterInput = flattenSvgForRaster(data.svg, data.colors)
+    const image = sharp(Buffer.from(rasterInput.svg), { density: 300 })
+      .resize(EXPORT_WIDTH, EXPORT_HEIGHT, {
+        fit: "contain",
+        background: rasterInput.background,
+      })
+      .flatten({ background: rasterInput.background })
+
+    const buffer =
+      data.format === "png"
+        ? await image.png().toBuffer()
+        : await image.jpeg({ quality: 92 }).toBuffer()
+
+    return new Response(buffer, {
+      headers: {
+        "Content-Type": data.format === "png" ? "image/png" : "image/jpeg",
+        "Content-Disposition": `attachment; filename="${data.fileName}.${data.format}"`,
+      },
+    })
+  })
+
 function getExportName(code: string) {
   const firstMeaningfulLine = code
     .split("\n")
@@ -199,6 +355,41 @@ function getThemeLabel(themeName: string) {
     .split("-")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ")
+}
+
+function getExportLabel(format: ExportFormat) {
+  if (format === "png") {
+    return "Export PNG"
+  }
+
+  if (format === "jpeg") {
+    return "Export JPEG"
+  }
+
+  return "Export SVG"
+}
+
+function getExportIcon(format: ExportFormat) {
+  if (format === "png") {
+    return ImageIcon
+  }
+
+  if (format === "jpeg") {
+    return FileImageIcon
+  }
+
+  return FileType2Icon
+}
+
+function downloadBlob(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement("a")
+
+  link.href = url
+  link.download = fileName
+  link.click()
+
+  URL.revokeObjectURL(url)
 }
 
 function getSvgDimensions(svg: string) {
@@ -291,7 +482,7 @@ function ZoomablePreview({
     const scaledHeight = svgSize.height * scale
     const centeredY = (containerSize.height - scaledHeight) / 2
     const biasedY =
-      centeredY - Math.min(containerSize.height * 0.06, CANVAS_TOP_BIAS)
+      centeredY - Math.min(containerSize.height * 0.04, CANVAS_TOP_BIAS)
 
     return {
       scale,
@@ -383,6 +574,20 @@ function MermaidEditor({
           syntaxHighlighting(mermaidHighlightStyle),
           mermaidEditorTheme,
           EditorView.lineWrapping,
+          EditorView.domEventHandlers({
+            paste: (_event, view) => {
+              const { scrollTop, scrollLeft } = view.scrollDOM
+
+              window.requestAnimationFrame(() => {
+                view.scrollDOM.scrollTo({
+                  top: scrollTop,
+                  left: scrollLeft,
+                })
+              })
+
+              return false
+            },
+          }),
           EditorView.contentAttributes.of({
             "aria-label": "Mermaid diagram code",
             spellcheck: "false",
@@ -428,12 +633,15 @@ function MermaidEditor({
     })
   }, [value])
 
-  return <div ref={containerRef} className="h-full min-h-[40svh] w-full" />
+  return <div ref={containerRef} className="h-full min-h-0 w-full" />
 }
 
 function App() {
   const [code, setCode] = useState(INITIAL_CODE)
   const [themeName, setThemeName] = useState(DEFAULT_THEME)
+  const [exportingFormat, setExportingFormat] = useState<ExportFormat | null>(
+    null
+  )
   const deferredCode = useDeferredValue(code)
   const isRendering = deferredCode !== code
   const hasCode = code.trim().length > 0
@@ -461,40 +669,62 @@ function App() {
     }
   }, [deferredCode, renderOptions])
 
-  const exportDisabled = !hasCode || isRendering || !!renderState.error
+  const exportDisabled =
+    !hasCode || isRendering || !!renderState.error || exportingFormat !== null
 
-  function handleExport() {
+  async function handleExport(format: ExportFormat) {
     if (exportDisabled) {
       return
     }
 
     const svg = renderMermaidSVG(code, renderOptions)
-    const blob = new Blob([svg], {
-      type: "image/svg+xml;charset=utf-8",
-    })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement("a")
+    const fileName = getExportName(code)
 
-    link.href = url
-    link.download = `${getExportName(code)}.svg`
-    link.click()
+    setExportingFormat(format)
 
-    URL.revokeObjectURL(url)
+    try {
+      if (format === "svg") {
+        downloadBlob(
+          new Blob([svg], {
+            type: "image/svg+xml;charset=utf-8",
+          }),
+          `${fileName}.svg`
+        )
+        return
+      }
+
+      const response = await exportRasterDiagram({
+        data: {
+          svg,
+          fileName,
+          format,
+          colors: renderOptions,
+        },
+      })
+      const blob = await response.blob()
+
+      downloadBlob(blob, `${fileName}.${format}`)
+    } finally {
+      setExportingFormat(null)
+    }
   }
 
   return (
-    <main className="min-h-svh p-0">
-      <div className="min-h-svh">
-        <div className="grid min-h-svh lg:grid-cols-[minmax(260px,0.8fr)_minmax(0,2.2fr)]">
-          <section className="min-h-[40svh] border-b border-border lg:min-h-svh lg:border-r lg:border-b-0">
+    <main className="min-h-svh p-0 lg:h-svh lg:overflow-hidden">
+      <div className="min-h-svh lg:h-full">
+        <div className="grid min-h-svh lg:h-full lg:min-h-0 lg:grid-cols-[minmax(260px,0.8fr)_minmax(0,2.2fr)]">
+          <section className="min-h-[40svh] border-b border-border lg:min-h-0 lg:overflow-hidden lg:border-r lg:border-b-0">
             <span className="sr-only">Mermaid diagram code</span>
 
-            <div id="mermaid-code" className="min-h-[40svh] lg:min-h-svh">
+            <div
+              id="mermaid-code"
+              className="min-h-[40svh] lg:h-full lg:min-h-0 lg:overflow-y-auto lg:overscroll-contain"
+            >
               <MermaidEditor value={code} onChange={setCode} />
             </div>
           </section>
 
-          <section className="relative flex min-h-[40svh] min-w-0 items-center justify-center px-3 py-3 lg:min-h-svh lg:px-4 lg:py-4">
+          <section className="relative flex min-h-[40svh] min-w-0 items-center justify-center px-3 py-3 lg:min-h-0 lg:overflow-hidden lg:px-4 lg:py-4">
             <div className="absolute top-4 right-4 z-10 flex items-center gap-2">
               <Select
                 value={themeName}
@@ -506,7 +736,7 @@ function App() {
               >
                 <SelectTrigger
                   aria-label="Diagram theme"
-                  className="min-w-44 rounded-md"
+                  className="min-w-44 rounded-4xl"
                 >
                   <SelectValue placeholder="Select theme" />
                 </SelectTrigger>
@@ -519,13 +749,53 @@ function App() {
                 </SelectContent>
               </Select>
 
-              <Button onClick={handleExport} disabled={exportDisabled}>
-                <Download className="size-4" />
-                Export SVG
-              </Button>
+              <ButtonGroup>
+                <Button
+                  onClick={() => handleExport("png")}
+                  disabled={exportDisabled}
+                >
+                  <Download className="size-4" />
+                  {exportingFormat === "png"
+                    ? "Exporting PNG..."
+                    : "Export PNG"}
+                </Button>
+
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    render={
+                      <Button
+                        disabled={exportDisabled}
+                        className="px-2.5"
+                        aria-label="More export options"
+                      >
+                        <ChevronDownIcon />
+                      </Button>
+                    }
+                  />
+                  <DropdownMenuContent align="end" className="w-44">
+                    <DropdownMenuGroup>
+                      {(["png", "svg", "jpeg"] as ExportFormat[]).map(
+                        (format) => {
+                          const Icon = getExportIcon(format)
+
+                          return (
+                            <DropdownMenuItem
+                              key={format}
+                              onClick={() => handleExport(format)}
+                            >
+                              <Icon />
+                              {getExportLabel(format)}
+                            </DropdownMenuItem>
+                          )
+                        }
+                      )}
+                    </DropdownMenuGroup>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </ButtonGroup>
             </div>
 
-            <div className="flex h-full w-full items-center justify-center overflow-hidden">
+            <div className="flex h-full min-h-0 w-full items-center justify-center overflow-hidden">
               {!hasCode ? (
                 <div className="text-sm text-muted-foreground">Preview</div>
               ) : renderState.error ? (
